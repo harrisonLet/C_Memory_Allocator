@@ -122,7 +122,7 @@ void *mm_malloc(size_t size)
   // return p;
 
   int new_size = ALIGN(size + OVERHEAD);
-  void *bp = first_bp;
+  void *bp = f_bp;
 
   while (GET_SIZE(HDRP(bp)) != 0) {
     if (!GET_ALLOC(HDRP(bp))
