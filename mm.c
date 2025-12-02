@@ -24,24 +24,8 @@
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~(ALIGNMENT-1))
 
-/* Rounds pointers to the nearest multiple of ALIGNMENT */
-#define ALIGN_PTR(p) ((void *)(((uintptr_t)(p) + (ALIGNMENT - 1)) & ~(uintptr_t)(ALIGNMENT - 1)))
-
 /* rounds up to the nearest multiple of mem_pagesize() */
 #define PAGE_ALIGN(size) (((size) + (mem_pagesize()-1)) & ~(mem_pagesize()-1))
-
-
-/* Additional constants and macros*/
-
-#define CHUNK_SIZE (1<<14) // Chunks are 4 pages
-
-/* rounds up to the nearest multiple of CHUNK_SIZE */
-#define CHUNK_ALIGN(size) (((size) + (CHUNK_SIZE-1)) & ~(CHUNK_SIZE-1))
-
-
-// For block header
-
-#define OVERHEAD sizeof(block_header) + sizeof(block_footer)
 
 /* Get to header from payload pointer bp */
 #define HDRP(bp) ((char *) (bp) - sizeof(block_header))
@@ -83,7 +67,7 @@
   #define MIN_BLOCK_SIZE (2 * sizeof(void *) + BLOCK_OVERHEAD)
 
   /* Page overhead (page header + prologue + epilogue) */
-  #define PAGE_OVERHEAD (sizeof(page_header) + BLOCK_OVERHEAD + sizeof(block_header))
+  #define PAGE_OVERHEAD (BLOCK_OVERHEAD + BLOCK_OVERHEAD)
 
 
 /* Explicit free list macros - access pointers stored in payload */
@@ -98,12 +82,10 @@
 
 /* Global variables */
 void *current_avail = NULL;
-size_t current_avail_size = 0;
 
 void *first_bp = NULL;
 
 void *first_page = NULL;
-void *last_page = NULL;
 
 void *free_list_head = NULL;
 
@@ -116,13 +98,6 @@ typedef size_t block_header;
 
 /* Block footer  */
 typedef size_t block_footer;
-
-/* Page header */
-typedef struct page_header {
-    struct page_header *next;  // Pointer to next page
-    size_t page_size;          // Total size of this page
-
-} page_header;
 
 
 /* Forward declarations */
@@ -148,12 +123,10 @@ int mm_init(void)
   fprintf(stderr, "[DEBUG] mm_init() called\n");
   
   first_page = NULL;
-  last_page = NULL;
 
   free_list_head = NULL;
   
   void *bp = extend(1);
-  fprintf(stderr, "[DEBUG] mm_init() - Initial extend returned bp=%p\n", bp);
  
   return 0;
 }
@@ -243,7 +216,7 @@ void *extend(size_t req_size) {
   //overhead which is terminator + page header + prologue
 
   // Size of new page, aligned to 4096 bytes
-  size_t new_size = PAGE_ALIGN(ALIGN(req_size + PAGE_OVERHEAD));
+  size_t new_size = PAGE_ALIGN(req_size + PAGE_OVERHEAD);
   fprintf(stderr, "[DEBUG] extend() - new_size after alignment=%zu (PAGE_OVERHEAD=%zu)\n", new_size, PAGE_OVERHEAD);
 
   // Request memory from mmap
@@ -255,54 +228,45 @@ void *extend(size_t req_size) {
   fprintf(stderr, "[DEBUG] extend() - mem_map succeeded, new_page=%p\n", new_page);
 
 
-  // Set up the page header at the beginning
-  page_header *page_hdr = (page_header *)new_page;
-  page_hdr->page_size = new_size;
-  page_hdr->next = NULL;
-
-
   if (first_page == NULL) { // First page being added
-      first_page = page_hdr;
-      last_page = page_hdr;
-  } else {
-      page_header *last = (page_header *)last_page; // Retrieve last page header
-      last->next = page_hdr;  // Link to end of list
-      last_page = page_hdr;  // Update last_page to new page
+      first_page = new_page;
   }
 
 
-  // Move past the page header to start setting up blocks
-  char *start = (char *)new_page + sizeof(page_header) + sizeof(block_header);
+  // Move past the padding to start setting up blocks
+  char *start = (char *)new_page;
 
-  start = ALIGN_PTR(start);
- 
-  
-  // Set up prologue block (allocated, minimal size)
-  PUT(HDRP(start), PACK(BLOCK_OVERHEAD, 1));  // Prologue header
-  PUT(FTRP(start), PACK(BLOCK_OVERHEAD, 1));  // Prologue footer
-  fprintf(stderr, "[DEBUG] extend() - prologue set at start=%p\n", start);
-  
-  // Move to the main free block
-  char *bp = start + BLOCK_OVERHEAD;  // bp points to payload of first real block
+  PUT(start, 0);
+
+  char* prologue = start + BLOCK_OVERHEAD;
+
+  // Set up prologue
+  PUT(HDRP(prologue), PACK(BLOCK_OVERHEAD, 1));
+  PUT(FTRP(prologue), PACK(BLOCK_OVERHEAD, 1));
+
+
+  // Set up free block
+
+  char* free_block = prologue + BLOCK_OVERHEAD;
   
   // Calculate size of the main free block
   size_t block_size = ALIGN(new_size - PAGE_OVERHEAD);
 
-  fprintf(stderr, "[DEBUG] extend() - main free block bp=%p, size=%zu\n", bp, block_size);
+  PUT(HDRP(free_block), PACK(block_size, 0));
+  PUT(FTRP(free_block), PACK(block_size, 0));
 
+  
+  fprintf(stderr, "[DEBUG] extend() - main free block bp=%p, size=%zu\n", free_block, block_size);
 
-  // Set up the main free block (unallocated)
-  PUT(HDRP(bp), PACK(block_size, 0));  // Block header
-  PUT(FTRP(bp), PACK(block_size, 0));  // Block footer
   
   // Set up epilogue block (allocated, zero size) - marks end of page
-  PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));  // Epilogue header
-  fprintf(stderr, "[DEBUG] extend() - epilogue set at offset %zu\n", (size_t)NEXT_BLKP(bp) - (size_t)new_page);
+  PUT(HDRP(NEXT_BLKP(free_block)), PACK(0, 1));  // Epilogue header
+  fprintf(stderr, "[DEBUG] extend() - epilogue set at offset %zu\n", (size_t)NEXT_BLKP(free_block) - (size_t)new_page);
 
-  add_to_free_list(bp);  // Add the new free block to the free list
-  fprintf(stderr, "[DEBUG] extend() - returning bp=%p\n", bp);
+  add_to_free_list(free_block);  // Add the new free block to the free list
+  fprintf(stderr, "[DEBUG] extend() - returning bp=%p\n", free_block);
   
-  return bp;  // Return pointer to payload of the free block
+  return free_block;  // Return pointer to payload of the free block
 }
 
 
@@ -332,7 +296,6 @@ void set_allocated(void *bp, size_t size) {
     // No remaining block space
     PUT(HDRP(bp), PACK(block_size, 1));  // Allocate entire block
     PUT(FTRP(bp), PACK(block_size, 1));  // Allocate entire block footer  
-
   }
 }
 
