@@ -180,7 +180,7 @@ void mm_free(void *ptr)
 {
   PUT(HDRP(ptr), PACK(GET_SIZE(HDRP(ptr)), 0));  // Mark header as free
   PUT(FTRP(ptr), PACK(GET_SIZE(HDRP(ptr)), 0));  // Mark footer as free
-  // coalesce(ptr);
+  //coalesce(ptr);
 }
 
 /* Helper Functions */
@@ -258,48 +258,44 @@ void set_allocated(void *bp, size_t size) {
 }
 
 
-// void *coalesce (void *bp) {
-//   size_t prev_alloc = GET_ALLOC(HDRP(PREV_BLKP(bp)));
-//   size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
-//   size_t size = GET_SIZE(HDRP(bp));
-
-
-//   // Case 1: Nothing to do
-
-//   if (prev_alloc && next_alloc) {
-//     /* Do nothing */
-//   }
-
-//   // Case 2: Freed block before another free block 
-
-//   else if (prev_alloc && !next_alloc) {
-//     size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-//     GET_SIZE(HDRP(bp)) = size;
-//     GET_SIZE(FTRP(bp)) = size;
-//   }
-
-//   // Case 3: Freed block after another free block
-
-//   else if (!prev_alloc && next_alloc) {
-//     size += GET_SIZE(HDRP(PREV_BLKP(bp)));
-//     GET_SIZE(FTRP(bp)) = size;
-//     GET_SIZE(HDRP(PREV_BLKP(bp))) = size;
-//     bp = PREV_BLKP(bp);
-//   }
-
-//   // Case 4: Freed block between free blocks
-
-//   else {
-//     size += (GET_SIZE(HDRP(PREV_BLKP(bp)))
-//               + GET_SIZE(HDRP(NEXT_BLKP(bp))));
-    
-//     GET_SIZE(HDRP(PREV_BLKP(bp))) = size;
-//     GET_SIZE(FTRP(NEXT_BLKP(bp))) = size;
-//     bp = PREV_BLKP(bp);
-//   }
-
-
-//   // Pointer to payload of coalesced free block
-//   return bp;
+void *coalesce(void *bp) {
+  size_t prev_alloc = GET_ALLOC(HDRP(PREV_BLKP(bp)));
+  size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
+  size_t size = GET_SIZE(HDRP(bp));
   
-// }
+  // Don't coalesce if next block is epilogue (size 0)
+  if (GET_SIZE(HDRP(NEXT_BLKP(bp))) == 0) {
+    next_alloc = 1;  // Treat epilogue as allocated (can't coalesce)
+  }
+
+  // Case 1: Nothing to do
+  if (prev_alloc && next_alloc) {
+    return bp;
+  }
+
+  // Case 2: Coalesce with next block (only if not epilogue)
+  else if (prev_alloc && !next_alloc && GET_SIZE(HDRP(NEXT_BLKP(bp))) > 0) {
+    size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+    PUT(HDRP(bp), PACK(size, 0));
+    PUT(FTRP(bp), PACK(size, 0));
+  }
+
+  // Case 3: Coalesce with previous block
+  else if (!prev_alloc && next_alloc) {
+    size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+    PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+    PUT(FTRP(bp), PACK(size, 0));
+    bp = PREV_BLKP(bp);
+  }
+
+  // Case 4: Coalesce with both (only if next is not epilogue)
+  else if (!prev_alloc && !next_alloc && GET_SIZE(HDRP(NEXT_BLKP(bp))) > 0) {
+    size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
+    PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+    PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
+    bp = PREV_BLKP(bp);
+  }
+
+  return bp;
+}
+
