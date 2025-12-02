@@ -10,6 +10,7 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <assert.h>
 #include <unistd.h>
 #include <string.h>
@@ -22,6 +23,9 @@
 
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~(ALIGNMENT-1))
+
+/* Rounds pointers to the nearest multiple of ALIGNMENT */
+#define ALIGN_PTR(p) ((void *)(((uintptr_t)(p) + (ALIGNMENT - 1)) & ~(uintptr_t)(ALIGNMENT - 1)))
 
 /* rounds up to the nearest multiple of mem_pagesize() */
 #define PAGE_ALIGN(size) (((size) + (mem_pagesize()-1)) & ~(mem_pagesize()-1))
@@ -47,7 +51,7 @@
 
   #define NEXT_BLKP(bp) ((char *) (bp) + GET_SIZE(HDRP(bp)))
 
-  #define PREV_BLKP(bp) ((char *) (bp) - GET_SIZE((char *)  (bp) - OVERHEAD))
+  #define PREV_BLKP(bp) ((char *) (bp) - GET_SIZE((char *) (bp) - sizeof(block_footer)))
 
 /* For packed headers/footers */
   #define GET(p) (*(size_t *) (p))
@@ -67,8 +71,7 @@
 
 
   /* Page header structure access */
-  #define GET_PAGE_HEADER(bp) ((page_header *)((char *)(bp) - sizeof(page_header)))
-  #define GET_PAGE_SIZE(page) ((page_header *)(page))->size
+  #define GET_PAGE_SIZE(page) ((page_header *)(page))->page_size
   #define GET_NEXT_PAGE(page) ((page_header *)(page))->next
 
 
@@ -80,7 +83,16 @@
   #define MIN_BLOCK_SIZE (2 * sizeof(void *) + BLOCK_OVERHEAD)
 
   /* Page overhead (page header + prologue + epilogue) */
-  #define PAGE_OVERHEAD (sizeof(page_header) + 2 * BLOCK_OVERHEAD)
+  #define PAGE_OVERHEAD (sizeof(page_header) + BLOCK_OVERHEAD + sizeof(block_header))
+
+
+/* Explicit free list macros - access pointers stored in payload */
+#define GET_NEXT_FREE(bp) (*(void **)(bp))
+#define GET_PREV_FREE(bp) (*(void **)((char *)(bp) + sizeof(void *)))
+
+#define SET_NEXT_FREE(bp, next) (GET_NEXT_FREE(bp) = (next))
+#define SET_PREV_FREE(bp, prev) (GET_PREV_FREE(bp) = (prev))
+
 
 
 
@@ -92,6 +104,9 @@ void *first_bp = NULL;
 
 void *first_page = NULL;
 void *last_page = NULL;
+
+void *free_list_head = NULL;
+
 
 
 /* Useful structs*/
@@ -106,6 +121,7 @@ typedef size_t block_footer;
 typedef struct page_header {
     struct page_header *next;  // Pointer to next page
     size_t page_size;          // Total size of this page
+
 } page_header;
 
 
@@ -113,6 +129,8 @@ typedef struct page_header {
 void *extend(size_t req_size);
 void set_allocated(void *bp, size_t size);
 void *coalesce(void *bp);
+void add_to_free_list(void *bp);
+void remove_from_free_list(void *bp);
 
 
 
@@ -127,9 +145,16 @@ int mm_init(void)
   // extend by1 
   // return return -1 if failed 0 if success
 
+  fprintf(stderr, "[DEBUG] mm_init() called\n");
+  
   first_page = NULL;
-  extend(1);
+  last_page = NULL;
 
+  free_list_head = NULL;
+  
+  void *bp = extend(1);
+  fprintf(stderr, "[DEBUG] mm_init() - Initial extend returned bp=%p\n", bp);
+ 
   return 0;
 }
 
@@ -139,38 +164,52 @@ int mm_init(void)
  */
 void *mm_malloc(size_t size)
 {
+  fprintf(stderr, "[DEBUG] mm_malloc() - requested size=%zu\n", size);
 
- int new_size = ALIGN(size + BLOCK_OVERHEAD);
-    
-    // Traverse through each page
-    page_header *current_page = (page_header *)first_page;    
+  if (size == 0) {
+      fprintf(stderr, "[DEBUG] mm_malloc() - size is 0, returning NULL\n");
+      return NULL;
+  }
 
-    while (current_page != NULL) {
-        // Start at the first block in this page
-        char *page_start = (char *)current_page + sizeof(page_header);
-        char *bp = page_start + BLOCK_OVERHEAD;  // Skip prologue
-        
-        // Traverse blocks within this page until we hit the epilogue (size == 0)
-        while (GET_SIZE(HDRP(bp)) != 0) {
-            if (!GET_ALLOC(HDRP(bp)) && (GET_SIZE(HDRP(bp)) >= new_size)) {
-                // Found a suitable free block
-                set_allocated(bp, new_size);
-                return bp;
-            }
-            bp = NEXT_BLKP(bp);  // Move to next block in this page
-        }
-        
-        // Didn't find space in this page, move to next page
-        current_page = current_page->next;
-    }
+  int new_size = ALIGN(size + BLOCK_OVERHEAD);
+
+  if (new_size < MIN_BLOCK_SIZE) {
+      new_size = MIN_BLOCK_SIZE;
+  }
+  
+  fprintf(stderr, "[DEBUG] mm_malloc() - aligned size=%d, MIN_BLOCK_SIZE=%zu\n", new_size, MIN_BLOCK_SIZE);
     
-    // No suitable block found in any page, need to extend
-    void *bp = extend(new_size);
-    if (bp == NULL) {
-        return NULL;  // extend failed
+  // Traverse through the free list
+
+  void *bp = free_list_head;
+
+  while (bp != NULL) {
+    size_t block_size = GET_SIZE(HDRP(bp));
+    fprintf(stderr, "[DEBUG] mm_malloc() - checking free block bp=%p, size=%zu\n", bp, block_size);
+    if (block_size >= new_size) {
+        // Found a suitable block
+        fprintf(stderr, "[DEBUG] mm_malloc() - found suitable block, allocating\n");
+        remove_from_free_list(bp);
+        set_allocated(bp, new_size);
+        fprintf(stderr, "[DEBUG] mm_malloc() - returning allocated block bp=%p\n", bp);
+        return bp;
     }
-    set_allocated(bp, new_size);
-    return bp;
+    bp = GET_NEXT_FREE(bp);
+  }
+  
+  fprintf(stderr, "[DEBUG] mm_malloc() - no suitable free block found, extending\n");
+  // No suitable block found in any page, need to extend
+  bp = extend(new_size);
+  if (bp == NULL) {
+      fprintf(stderr, "[DEBUG] mm_malloc() - extend failed\n");
+      return NULL;  // extend failed
+  }
+
+  fprintf(stderr, "[DEBUG] mm_malloc() - extend successful, bp=%p\n", bp);
+  remove_from_free_list(bp);
+  set_allocated(bp, new_size);
+  fprintf(stderr, "[DEBUG] mm_malloc() - returning allocated block bp=%p\n", bp);
+  return bp;
 }
 
 /*
@@ -178,27 +217,43 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *ptr)
 {
-  PUT(HDRP(ptr), PACK(GET_SIZE(HDRP(ptr)), 0));  // Mark header as free
-  PUT(FTRP(ptr), PACK(GET_SIZE(HDRP(ptr)), 0));  // Mark footer as free
+  if (ptr == NULL) {
+      fprintf(stderr, "[DEBUG] mm_free() - ptr is NULL, ignoring\n");
+      return;
+  }
+  
+  size_t block_size = GET_SIZE(HDRP(ptr));
+  fprintf(stderr, "[DEBUG] mm_free() - freeing block ptr=%p, size=%zu\n", ptr, block_size);
+  
+  PUT(HDRP(ptr), PACK(block_size, 0));  // Mark header as free
+  PUT(FTRP(ptr), PACK(block_size, 0));  // Mark footer as free
+
+  add_to_free_list(ptr);
+  fprintf(stderr, "[DEBUG] mm_free() - added to free list\n");
   //coalesce(ptr);
 }
 
 /* Helper Functions */
 
 void *extend(size_t req_size) {
+  fprintf(stderr, "[DEBUG] extend() - requested size=%zu\n", req_size);
 
   //New page size required is the
   //passed in size + room for the page 
   //overhead which is terminator + page header + prologue
 
   // Size of new page, aligned to 4096 bytes
-  size_t new_size = PAGE_ALIGN(req_size + PAGE_OVERHEAD);
+  size_t new_size = PAGE_ALIGN(ALIGN(req_size + PAGE_OVERHEAD));
+  fprintf(stderr, "[DEBUG] extend() - new_size after alignment=%zu (PAGE_OVERHEAD=%zu)\n", new_size, PAGE_OVERHEAD);
 
   // Request memory from mmap
   void *new_page = mem_map(new_size);
   if (new_page == NULL) {
+    fprintf(stderr, "[DEBUG] extend() - mem_map failed\n");
     return NULL;  // mmap failed
   }
+  fprintf(stderr, "[DEBUG] extend() - mem_map succeeded, new_page=%p\n", new_page);
+
 
   // Set up the page header at the beginning
   page_header *page_hdr = (page_header *)new_page;
@@ -217,24 +272,35 @@ void *extend(size_t req_size) {
 
 
   // Move past the page header to start setting up blocks
-  char *start = (char *)new_page + sizeof(page_header);
+  char *start = (char *)new_page + sizeof(page_header) + sizeof(block_header);
+
+  start = ALIGN_PTR(start);
+ 
   
   // Set up prologue block (allocated, minimal size)
-  PUT(start, PACK(BLOCK_OVERHEAD, 1));  // Prologue header
-  PUT(start + sizeof(block_header), PACK(BLOCK_OVERHEAD, 1));  // Prologue footer
+  PUT(HDRP(start), PACK(BLOCK_OVERHEAD, 1));  // Prologue header
+  PUT(FTRP(start), PACK(BLOCK_OVERHEAD, 1));  // Prologue footer
+  fprintf(stderr, "[DEBUG] extend() - prologue set at start=%p\n", start);
   
   // Move to the main free block
   char *bp = start + BLOCK_OVERHEAD;  // bp points to payload of first real block
   
   // Calculate size of the main free block
-  size_t block_size = new_size - sizeof(page_header) - 2 * BLOCK_OVERHEAD;
-  
+  size_t block_size = ALIGN(new_size - PAGE_OVERHEAD);
+
+  fprintf(stderr, "[DEBUG] extend() - main free block bp=%p, size=%zu\n", bp, block_size);
+
+
   // Set up the main free block (unallocated)
   PUT(HDRP(bp), PACK(block_size, 0));  // Block header
   PUT(FTRP(bp), PACK(block_size, 0));  // Block footer
   
   // Set up epilogue block (allocated, zero size) - marks end of page
   PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));  // Epilogue header
+  fprintf(stderr, "[DEBUG] extend() - epilogue set at offset %zu\n", (size_t)NEXT_BLKP(bp) - (size_t)new_page);
+
+  add_to_free_list(bp);  // Add the new free block to the free list
+  fprintf(stderr, "[DEBUG] extend() - returning bp=%p\n", bp);
   
   return bp;  // Return pointer to payload of the free block
 }
@@ -243,17 +309,30 @@ void *extend(size_t req_size) {
 
 void set_allocated(void *bp, size_t size) {
   size_t block_size = GET_SIZE(HDRP(bp));  // Get ORIGINAL block size first
+  size_t remaining_size = block_size - size;  // Leftover space in block after allocation
   
-  // Update header and footer for the allocated portion
-  PUT(HDRP(bp), PACK(size, 1));
-  PUT(FTRP(bp), PACK(size, 1));
+  fprintf(stderr, "[DEBUG] set_allocated() - bp=%p, requested size=%zu, actual block_size=%zu, remaining=%zu\n", 
+          bp, size, block_size, remaining_size);
   
-  // If there's leftover space, split and mark it as free
-  if (block_size > size) {
-    size_t remaining_size = block_size - size;
-    void *next_bp = NEXT_BLKP(bp);
-    PUT(HDRP(next_bp), PACK(remaining_size, 0));  // Free block
-    PUT(FTRP(next_bp), PACK(remaining_size, 0));
+  if (remaining_size >= MIN_BLOCK_SIZE) {
+    fprintf(stderr, "[DEBUG] set_allocated() - splitting block, allocated=%zu, free=%zu\n", size, remaining_size);
+    PUT(HDRP(bp), PACK(size, 1));  // Set allocated block header
+    PUT(FTRP(bp), PACK(size, 1));  // Set allocated block footer
+
+    void *remain = NEXT_BLKP(bp);  // Move to the remaining free block
+    PUT(HDRP(remain), PACK(remaining_size, 0));  // Set free for remainder
+    PUT(FTRP(remain), PACK(remaining_size, 0));  // Set free footer for remainder
+
+    add_to_free_list(remain);  // Add remaining free block to free list
+    fprintf(stderr, "[DEBUG] set_allocated() - remainder added to free list at=%p\n", remain);
+  } 
+  
+  else {
+    fprintf(stderr, "[DEBUG] set_allocated() - no split, using entire block of size=%zu\n", block_size);
+    // No remaining block space
+    PUT(HDRP(bp), PACK(block_size, 1));  // Allocate entire block
+    PUT(FTRP(bp), PACK(block_size, 1));  // Allocate entire block footer  
+
   }
 }
 
@@ -299,3 +378,39 @@ void *coalesce(void *bp) {
   return bp;
 }
 
+
+
+void add_to_free_list(void *bp) {
+    fprintf(stderr, "[DEBUG] add_to_free_list() - adding bp=%p, size=%zu, old head=%p\n", 
+            bp, GET_SIZE(HDRP(bp)), free_list_head);
+    
+    SET_NEXT_FREE(bp, free_list_head);
+    SET_PREV_FREE(bp, NULL);
+    
+    if (free_list_head != NULL) {
+        SET_PREV_FREE(free_list_head, bp);
+    }
+    
+    free_list_head = bp;
+    fprintf(stderr, "[DEBUG] add_to_free_list() - new head=%p\n", free_list_head);
+}
+
+void remove_from_free_list(void *bp) {
+    void *next = GET_NEXT_FREE(bp);
+    void *prev = GET_PREV_FREE(bp);
+    
+    fprintf(stderr, "[DEBUG] remove_from_free_list() - removing bp=%p, prev=%p, next=%p\n", bp, prev, next);
+    
+    // Update previous block's next pointer (or head if bp is first)
+    if (prev == NULL) {
+        free_list_head = next;  // bp was the head
+        fprintf(stderr, "[DEBUG] remove_from_free_list() - was head, new head=%p\n", free_list_head);
+    } else {
+        SET_NEXT_FREE(prev, next);
+    }
+    
+    // Update next block's prev pointer
+    if (next != NULL) {
+        SET_PREV_FREE(next, prev);
+    }
+}

@@ -1,0 +1,9 @@
+gcc -g -O0 -std=gnu99 -Wall -Wextra   -c -o mm.o mm.c
+mm.c: In function ‘mm_malloc’:
+mm.c:172:16: warning: comparison of integer expressions of different signedness: ‘int’ and ‘long unsigned int’ [-Wsign-compare]
+   if (new_size < MIN_BLOCK_SIZE) {
+                ^
+mm.c:185:20: warning: comparison of integer expressions of different signedness: ‘size_t’ {aka ‘long unsigned int’} and ‘int’ [-Wsign-compare]
+     if (block_size >= new_size) {
+                    ^~
+gcc -g -O0 -std=gnu99 -Wall -Wextra -o mdriver mdriver.o mm.o memlib.o pagemap.o fsecs.o fcyc.o clock.o ftimer.o -lm
