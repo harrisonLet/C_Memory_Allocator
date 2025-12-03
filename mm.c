@@ -18,6 +18,15 @@
 #include "mm.h"
 #include "memlib.h"
 
+/* Debug flag: set to 0 to disable debug output, 1 to enable */
+#define DEBUG 0
+
+#if DEBUG
+  #define DEBUG_PRINT(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
+#else
+  #define DEBUG_PRINT(fmt, ...) (void)0
+#endif
+
 /* always use 16-byte alignment for blocks */
 #define ALIGNMENT 16
 
@@ -120,7 +129,7 @@ int mm_init(void)
   // extend by1 
   // return return -1 if failed 0 if success
 
-  fprintf(stderr, "[DEBUG] mm_init() called\n");
+  DEBUG_PRINT("[DEBUG] mm_init() called\n");
   
   first_page = NULL;
 
@@ -137,10 +146,10 @@ int mm_init(void)
  */
 void *mm_malloc(size_t size)
 {
-  fprintf(stderr, "[DEBUG] mm_malloc() - requested size=%zu\n", size);
+  DEBUG_PRINT("[DEBUG] mm_malloc() - requested size=%zu\n", size);
 
   if (size == 0) {
-      fprintf(stderr, "[DEBUG] mm_malloc() - size is 0, returning NULL\n");
+      DEBUG_PRINT("[DEBUG] mm_malloc() - size is 0, returning NULL\n");
       return NULL;
   }
 
@@ -150,7 +159,7 @@ void *mm_malloc(size_t size)
       new_size = MIN_BLOCK_SIZE;
   }
   
-  fprintf(stderr, "[DEBUG] mm_malloc() - aligned size=%d, MIN_BLOCK_SIZE=%zu\n", new_size, MIN_BLOCK_SIZE);
+  DEBUG_PRINT("[DEBUG] mm_malloc() - aligned size=%d, MIN_BLOCK_SIZE=%zu\n", new_size, MIN_BLOCK_SIZE);
     
   // Traverse through the free list
 
@@ -158,30 +167,30 @@ void *mm_malloc(size_t size)
 
   while (bp != NULL) {
     size_t block_size = GET_SIZE(HDRP(bp));
-    fprintf(stderr, "[DEBUG] mm_malloc() - checking free block bp=%p, size=%zu\n", bp, block_size);
+    DEBUG_PRINT("[DEBUG] mm_malloc() - checking free block bp=%p, size=%zu\n", bp, block_size);
     if (block_size >= new_size) {
         // Found a suitable block
-        fprintf(stderr, "[DEBUG] mm_malloc() - found suitable block, allocating\n");
+        DEBUG_PRINT("[DEBUG] mm_malloc() - found suitable block, allocating\n");
         remove_from_free_list(bp);
         set_allocated(bp, new_size);
-        fprintf(stderr, "[DEBUG] mm_malloc() - returning allocated block bp=%p\n", bp);
+        DEBUG_PRINT("[DEBUG] mm_malloc() - returning allocated block bp=%p\n", bp);
         return bp;
     }
     bp = GET_NEXT_FREE(bp);
   }
   
-  fprintf(stderr, "[DEBUG] mm_malloc() - no suitable free block found, extending\n");
+  DEBUG_PRINT("[DEBUG] mm_malloc() - no suitable free block found, extending\n");
   // No suitable block found in any page, need to extend
   bp = extend(new_size);
   if (bp == NULL) {
-      fprintf(stderr, "[DEBUG] mm_malloc() - extend failed\n");
+      DEBUG_PRINT("[DEBUG] mm_malloc() - extend failed\n");
       return NULL;  // extend failed
   }
 
-  fprintf(stderr, "[DEBUG] mm_malloc() - extend successful, bp=%p\n", bp);
+  DEBUG_PRINT("[DEBUG] mm_malloc() - extend successful, bp=%p\n", bp);
   remove_from_free_list(bp);
   set_allocated(bp, new_size);
-  fprintf(stderr, "[DEBUG] mm_malloc() - returning allocated block bp=%p\n", bp);
+  DEBUG_PRINT("[DEBUG] mm_malloc() - returning allocated block bp=%p\n", bp);
   return bp;
 }
 
@@ -191,25 +200,27 @@ void *mm_malloc(size_t size)
 void mm_free(void *ptr)
 {
   if (ptr == NULL) {
-      fprintf(stderr, "[DEBUG] mm_free() - ptr is NULL, ignoring\n");
+      DEBUG_PRINT("[DEBUG] mm_free() - ptr is NULL, ignoring\n");
       return;
   }
   
   size_t block_size = GET_SIZE(HDRP(ptr));
-  fprintf(stderr, "[DEBUG] mm_free() - freeing block ptr=%p, size=%zu\n", ptr, block_size);
+  DEBUG_PRINT("[DEBUG] mm_free() - freeing block ptr=%p, size=%zu\n", ptr, block_size);
   
   PUT(HDRP(ptr), PACK(block_size, 0));  // Mark header as free
   PUT(FTRP(ptr), PACK(block_size, 0));  // Mark footer as free
 
-  add_to_free_list(ptr);
-  fprintf(stderr, "[DEBUG] mm_free() - added to free list\n");
-  //coalesce(ptr);
+
+
+  // ptr = coalesce(ptr);
+  // add_to_free_list(ptr);
+  // DEBUG_PRINT("[DEBUG] mm_free() - added to free list\n");
 }
 
 /* Helper Functions */
 
 void *extend(size_t req_size) {
-  fprintf(stderr, "[DEBUG] extend() - requested size=%zu\n", req_size);
+  DEBUG_PRINT("[DEBUG] extend() - requested size=%zu\n", req_size);
 
   //New page size required is the
   //passed in size + room for the page 
@@ -217,15 +228,15 @@ void *extend(size_t req_size) {
 
   // Size of new page, aligned to 4096 bytes
   size_t new_size = PAGE_ALIGN(req_size + PAGE_OVERHEAD);
-  fprintf(stderr, "[DEBUG] extend() - new_size after alignment=%zu (PAGE_OVERHEAD=%zu)\n", new_size, PAGE_OVERHEAD);
+  DEBUG_PRINT("[DEBUG] extend() - new_size after alignment=%zu (PAGE_OVERHEAD=%zu)\n", new_size, PAGE_OVERHEAD);
 
   // Request memory from mmap
   void *new_page = mem_map(new_size);
   if (new_page == NULL) {
-    fprintf(stderr, "[DEBUG] extend() - mem_map failed\n");
+    DEBUG_PRINT("[DEBUG] extend() - mem_map failed\n");
     return NULL;  // mmap failed
   }
-  fprintf(stderr, "[DEBUG] extend() - mem_map succeeded, new_page=%p\n", new_page);
+  DEBUG_PRINT("[DEBUG] extend() - mem_map succeeded, new_page=%p\n", new_page);
 
 
   if (first_page == NULL) { // First page being added
@@ -256,15 +267,15 @@ void *extend(size_t req_size) {
   PUT(FTRP(free_block), PACK(block_size, 0));
 
   
-  fprintf(stderr, "[DEBUG] extend() - main free block bp=%p, size=%zu\n", free_block, block_size);
+  DEBUG_PRINT("[DEBUG] extend() - main free block bp=%p, size=%zu\n", free_block, block_size);
 
   
   // Set up epilogue block (allocated, zero size) - marks end of page
   PUT(HDRP(NEXT_BLKP(free_block)), PACK(0, 1));  // Epilogue header
-  fprintf(stderr, "[DEBUG] extend() - epilogue set at offset %zu\n", (size_t)NEXT_BLKP(free_block) - (size_t)new_page);
+  DEBUG_PRINT("[DEBUG] extend() - epilogue set at offset %zu\n", (size_t)NEXT_BLKP(free_block) - (size_t)new_page);
 
   add_to_free_list(free_block);  // Add the new free block to the free list
-  fprintf(stderr, "[DEBUG] extend() - returning bp=%p\n", free_block);
+  DEBUG_PRINT("[DEBUG] extend() - returning bp=%p\n", free_block);
   
   return free_block;  // Return pointer to payload of the free block
 }
@@ -275,11 +286,11 @@ void set_allocated(void *bp, size_t size) {
   size_t block_size = GET_SIZE(HDRP(bp));  // Get ORIGINAL block size first
   size_t remaining_size = block_size - size;  // Leftover space in block after allocation
   
-  fprintf(stderr, "[DEBUG] set_allocated() - bp=%p, requested size=%zu, actual block_size=%zu, remaining=%zu\n", 
+  DEBUG_PRINT("[DEBUG] set_allocated() - bp=%p, requested size=%zu, actual block_size=%zu, remaining=%zu\n", 
           bp, size, block_size, remaining_size);
   
   if (remaining_size >= MIN_BLOCK_SIZE) {
-    fprintf(stderr, "[DEBUG] set_allocated() - splitting block, allocated=%zu, free=%zu\n", size, remaining_size);
+    DEBUG_PRINT("[DEBUG] set_allocated() - splitting block, allocated=%zu, free=%zu\n", size, remaining_size);
     PUT(HDRP(bp), PACK(size, 1));  // Set allocated block header
     PUT(FTRP(bp), PACK(size, 1));  // Set allocated block footer
 
@@ -288,11 +299,11 @@ void set_allocated(void *bp, size_t size) {
     PUT(FTRP(remain), PACK(remaining_size, 0));  // Set free footer for remainder
 
     add_to_free_list(remain);  // Add remaining free block to free list
-    fprintf(stderr, "[DEBUG] set_allocated() - remainder added to free list at=%p\n", remain);
+    DEBUG_PRINT("[DEBUG] set_allocated() - remainder added to free list at=%p\n", remain);
   } 
   
   else {
-    fprintf(stderr, "[DEBUG] set_allocated() - no split, using entire block of size=%zu\n", block_size);
+    DEBUG_PRINT("[DEBUG] set_allocated() - no split, using entire block of size=%zu\n", block_size);
     // No remaining block space
     PUT(HDRP(bp), PACK(block_size, 1));  // Allocate entire block
     PUT(FTRP(bp), PACK(block_size, 1));  // Allocate entire block footer  
@@ -300,51 +311,55 @@ void set_allocated(void *bp, size_t size) {
 }
 
 
-// void *coalesce(void *bp) {
-//   size_t prev_alloc = GET_ALLOC(HDRP(PREV_BLKP(bp)));
-//   size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
-//   size_t size = GET_SIZE(HDRP(bp));
+void *coalesce(void *bp) {
+  size_t prev_alloc = GET_ALLOC(HDRP(PREV_BLKP(bp)));
+  size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
+  size_t size = GET_SIZE(HDRP(bp));
   
-//   // Don't coalesce if next block is epilogue (size 0)
-//   if (GET_SIZE(HDRP(NEXT_BLKP(bp))) == 0) {
-//     next_alloc = 1;  // Treat epilogue as allocated (can't coalesce)
-//   }
+  // Don't coalesce if next block is epilogue (size 0)
+  if (GET_SIZE(HDRP(NEXT_BLKP(bp))) == 0) {
+    next_alloc = 1;  // Treat epilogue as allocated (can't coalesce)
+  }
 
-//   // Case 1: Nothing to do
-//   if (prev_alloc && next_alloc) {
-//     return bp;
-//   }
+  // Case 1: Nothing to do
+  if (prev_alloc && next_alloc) {
+    return bp;
+  }
 
-//   // Case 2: Coalesce with next block (only if not epilogue)
-//   else if (prev_alloc && !next_alloc && GET_SIZE(HDRP(NEXT_BLKP(bp))) > 0) {
-//     size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-//     PUT(HDRP(bp), PACK(size, 0));
-//     PUT(FTRP(bp), PACK(size, 0));
-//   }
+  // Case 2: Coalesce with next block (only if not epilogue)
+  else if (prev_alloc && !next_alloc && GET_SIZE(HDRP(NEXT_BLKP(bp))) > 0) {
+    void *next_bp = NEXT_BLKP(bp);
+    size += GET_SIZE(HDRP(next_bp));
+    PUT(HDRP(bp), PACK(size, 0));
+    PUT(FTRP(bp), PACK(size, 0));
+  }
 
-//   // Case 3: Coalesce with previous block
-//   else if (!prev_alloc && next_alloc) {
-//     size += GET_SIZE(HDRP(PREV_BLKP(bp)));
-//     PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-//     PUT(FTRP(bp), PACK(size, 0));
-//     bp = PREV_BLKP(bp);
-//   }
+  // Case 3: Coalesce with previous block
+  else if (!prev_alloc && next_alloc) {
+    void *prev_bp = PREV_BLKP(bp);
+    size += GET_SIZE(HDRP(prev_bp));
+    PUT(HDRP(prev_bp), PACK(size, 0));
+    PUT(FTRP(bp), PACK(size, 0));
+    bp = prev_bp;
+  }
 
-//   // Case 4: Coalesce with both (only if next is not epilogue)
-//   else if (!prev_alloc && !next_alloc && GET_SIZE(HDRP(NEXT_BLKP(bp))) > 0) {
-//     size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
-//     PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-//     PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
-//     bp = PREV_BLKP(bp);
-//   }
+  // Case 4: Coalesce with both (only if next is not epilogue)
+  else if (!prev_alloc && !next_alloc && GET_SIZE(HDRP(NEXT_BLKP(bp))) > 0) {
+    void *prev_bp = PREV_BLKP(bp);
+    void *next_bp = NEXT_BLKP(bp);
+    size += GET_SIZE(HDRP(prev_bp)) + GET_SIZE(HDRP(next_bp));
+    PUT(HDRP(prev_bp), PACK(size, 0));
+    PUT(FTRP(next_bp), PACK(size, 0));
+    bp = prev_bp;
+  }
 
-//   return bp;
-// }
+  return bp;
+}
 
 
 
 void add_to_free_list(void *bp) {
-    fprintf(stderr, "[DEBUG] add_to_free_list() - adding bp=%p, size=%zu, old head=%p\n", 
+    DEBUG_PRINT("[DEBUG] add_to_free_list() - adding bp=%p, size=%zu, old head=%p\n", 
             bp, GET_SIZE(HDRP(bp)), free_list_head);
     
     SET_NEXT_FREE(bp, free_list_head);
@@ -355,19 +370,19 @@ void add_to_free_list(void *bp) {
     }
     
     free_list_head = bp;
-    fprintf(stderr, "[DEBUG] add_to_free_list() - new head=%p\n", free_list_head);
+    DEBUG_PRINT("[DEBUG] add_to_free_list() - new head=%p\n", free_list_head);
 }
 
 void remove_from_free_list(void *bp) {
     void *next = GET_NEXT_FREE(bp);
     void *prev = GET_PREV_FREE(bp);
     
-    fprintf(stderr, "[DEBUG] remove_from_free_list() - removing bp=%p, prev=%p, next=%p\n", bp, prev, next);
+    DEBUG_PRINT("[DEBUG] remove_from_free_list() - removing bp=%p, prev=%p, next=%p\n", bp, prev, next);
     
     // Update previous block's next pointer (or head if bp is first)
     if (prev == NULL) {
         free_list_head = next;  // bp was the head
-        fprintf(stderr, "[DEBUG] remove_from_free_list() - was head, new head=%p\n", free_list_head);
+        DEBUG_PRINT("[DEBUG] remove_from_free_list() - was head, new head=%p\n", free_list_head);
     } else {
         SET_NEXT_FREE(prev, next);
     }
