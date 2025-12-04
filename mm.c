@@ -229,7 +229,7 @@ void *extend(size_t req_size) {
   //overhead which is terminator + page header + prologue
 
   // Size of new page, aligned to 4096 bytes
-  size_t new_size = PAGE_ALIGN(req_size + PAGE_OVERHEAD);
+  size_t new_size = PAGE_ALIGN((req_size + PAGE_OVERHEAD) * 30);
   DEBUG_PRINT("[DEBUG] extend() - new_size after alignment=%zu (PAGE_OVERHEAD=%zu)\n", new_size, PAGE_OVERHEAD);
 
   // Request memory from mmap
@@ -285,30 +285,31 @@ void *extend(size_t req_size) {
 
 
 void set_allocated(void *bp, size_t size) {
-  size_t block_size = GET_SIZE(HDRP(bp));  // Get ORIGINAL block size first
-  size_t remaining_size = block_size - size;  // Leftover space in block after allocation
+  size_t block_size = GET_SIZE(HDRP(bp));
+  size_t remaining_size = block_size - size;
   
   DEBUG_PRINT("[DEBUG] set_allocated() - bp=%p, requested size=%zu, actual block_size=%zu, remaining=%zu\n", 
           bp, size, block_size, remaining_size);
   
   if (remaining_size >= MIN_BLOCK_SIZE) {
     DEBUG_PRINT("[DEBUG] set_allocated() - splitting block, allocated=%zu, free=%zu\n", size, remaining_size);
-    PUT(HDRP(bp), PACK(size, 1));  // Set allocated block header
-    PUT(FTRP(bp), PACK(size, 1));  // Set allocated block footer
+    PUT(HDRP(bp), PACK(size, 1));
+    PUT(FTRP(bp), PACK(size, 1));
 
-    void *remain = NEXT_BLKP(bp);  // Move to the remaining free block
-    PUT(HDRP(remain), PACK(remaining_size, 0));  // Set free for remainder
-    PUT(FTRP(remain), PACK(remaining_size, 0));  // Set free footer for remainder
+    void *remain = NEXT_BLKP(bp);
+    
+    // VALIDATION: Check that remain is valid
+    DEBUG_PRINT("[DEBUG] set_allocated() - remain block at=%p\n", remain);
+    
+    PUT(HDRP(remain), PACK(remaining_size, 0));
+    PUT(FTRP(remain), PACK(remaining_size, 0));
 
-    add_to_free_list(remain);  // Add remaining free block to free list
-    DEBUG_PRINT("[DEBUG] set_allocated() - remainder added to free list at=%p\n", remain);
+    add_to_free_list(remain);
   } 
-  
   else {
     DEBUG_PRINT("[DEBUG] set_allocated() - no split, using entire block of size=%zu\n", block_size);
-    // No remaining block space
-    PUT(HDRP(bp), PACK(block_size, 1));  // Allocate entire block
-    PUT(FTRP(bp), PACK(block_size, 1));  // Allocate entire block footer  
+    PUT(HDRP(bp), PACK(block_size, 1));
+    PUT(FTRP(bp), PACK(block_size, 1));
   }
 }
 
