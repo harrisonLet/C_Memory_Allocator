@@ -16,7 +16,7 @@
 #include <string.h>
 
 #include "mm.h"
-#include "memlib.h"
+#include "memlib.h"   
 
 /* Debug flag: set to 0 to disable debug output, 1 to enable */
 #define DEBUG 0
@@ -76,7 +76,7 @@
   #define MIN_BLOCK_SIZE (2 * sizeof(void *) + BLOCK_OVERHEAD)
 
   /* Page overhead (page header + prologue + epilogue) */
-  #define PAGE_OVERHEAD (BLOCK_OVERHEAD + BLOCK_OVERHEAD)
+  #define PAGE_OVERHEAD (sizeof(page_header) + BLOCK_OVERHEAD + sizeof(page_header))
 
 
 /* Explicit free list macros - access pointers stored in payload */
@@ -96,7 +96,11 @@ void *first_bp = NULL;
 
 void *first_page = NULL;
 
+void *last_page = NULL;
+
 void *free_list_head = NULL;
+
+
 
 
 
@@ -108,6 +112,13 @@ typedef size_t block_header;
 /* Block footer  */
 typedef size_t block_footer;
 
+/* Page header */
+typedef struct page_header {
+    size_t page_size;              // Size of the page
+    struct page_header *next;      // Pointer to next page  
+    struct page_header *prev;      // Pointer to previous page
+} page_header;
+
 
 /* Forward declarations */
 void *extend(size_t req_size);
@@ -115,6 +126,8 @@ void set_allocated(void *bp, size_t size);
 void *coalesce(void *bp);
 void add_to_free_list(void *bp);
 void remove_from_free_list(void *bp);
+int is_full_page_block(void *bp);
+void *get_page_start(void *bp);
 
 
 
@@ -194,29 +207,103 @@ void *mm_malloc(size_t size)
   return bp;
 }
 
+
 /*
  * mm_free - Freeing a block does nothing.
  */
 void mm_free(void *ptr)
 {
-  if (ptr == NULL) {
-      DEBUG_PRINT("[DEBUG] mm_free() - ptr is NULL, ignoring\n");
-      return;
-  }
-  
-  size_t block_size = GET_SIZE(HDRP(ptr));
-  DEBUG_PRINT("[DEBUG] mm_free() - freeing block ptr=%p, size=%zu\n", ptr, block_size);
-  
-  PUT(HDRP(ptr), PACK(block_size, 0));  // Mark header as free
-  PUT(FTRP(ptr), PACK(block_size, 0));  // Mark footer as free
+    // 1. Validate Input
+    if (ptr == NULL) {
+        DEBUG_PRINT("[DEBUG] mm_free() - ptr is NULL, ignoring\n");
+        return;
+    }
 
-  DEBUG_PRINT("[DEBUG] mm_free() - added to free list\n");
+    // Capture initial state
+    void *hdr_ptr = HDRP(ptr);
+    size_t block_size = GET_SIZE(hdr_ptr);
+    int alloc_bit = GET_ALLOC(hdr_ptr);
+
+    DEBUG_PRINT("\n[DEBUG] --- mm_free(ptr=%p) Start ---\n", ptr);
+    DEBUG_PRINT("[DEBUG] mm_free() - Current Header: %p | Size: %zu | Alloc: %d\n", 
+                hdr_ptr, block_size, alloc_bit);
+
+    // 2. Safety Check: Double Free Detection
+    if (alloc_bit == 0) {
+        DEBUG_PRINT("[ERROR] mm_free() - Double free detected at %p!\n", ptr);
+        // exit(1); // Optional: Crash immediately on double free
+    }
+
+    // 3. Mark block as free
+    PUT(HDRP(ptr), PACK(block_size, 0));  // Mark header as free
+    PUT(FTRP(ptr), PACK(block_size, 0));  // Mark footer as free
+    
+    // Verify footer was placed correctly
+    DEBUG_PRINT("[DEBUG] mm_free() - Freed. New Header: 0x%x | New Footer at %p: 0x%x\n", 
+                GET(HDRP(ptr)), FTRP(ptr), GET(FTRP(ptr)));
+
+    // 4. Coalescing
+    DEBUG_PRINT("[DEBUG] mm_free() - Attempting coalesce...\n");
+    
+    void *old_ptr = ptr;
+    ptr = coalesce(ptr);
+    size_t new_size = GET_SIZE(HDRP(ptr));
 
 
+    if (ptr != old_ptr) {
+        DEBUG_PRINT("[DEBUG] mm_free() - Coalesced LEFT/BOTH. Ptr moved: %p -> %p\n", old_ptr, ptr);
+    } else if (new_size > block_size) {
+        DEBUG_PRINT("[DEBUG] mm_free() - Coalesced RIGHT. Ptr same, size increased: %zu -> %zu\n", block_size, new_size);
+    } else {
+        DEBUG_PRINT("[DEBUG] mm_free() - No coalescing occurred.\n");
+    }
 
-  ptr = coalesce(ptr);
-  add_to_free_list(ptr);
-  DEBUG_PRINT("[DEBUG] mm_free() - added to free list\n");
+    DEBUG_PRINT("[DEBUG] Adding %p to free list\n", ptr);
+
+    add_to_free_list(ptr);
+
+    // 5. Page Management Logic
+    int is_full = is_full_page_block(ptr);
+    DEBUG_PRINT("[DEBUG] mm_free() - Page Check. is_full_page_block: %d\n", is_full);
+
+    if (is_full) {
+        void *page_start = get_page_start(ptr);
+        
+        DEBUG_PRINT("[DEBUG] mm_free() - Page Start: %p | Global First Page: %p\n", 
+                    page_start, first_page);
+
+        if (page_start != NULL && page_start != first_page) {
+            page_header *pg_hdr = (page_header *)page_start;
+            size_t page_size = pg_hdr->page_size;
+            
+            DEBUG_PRINT("[DEBUG] mm_free() - UNMAPPING page. Size: %zu\n", page_size);
+            DEBUG_PRINT("[DEBUG] mm_free() - Unlinking: Prev Page: %p | Next Page: %p\n", 
+                        pg_hdr->prev, pg_hdr->next);
+            
+            // Remove from free list before unmapping
+            remove_from_free_list(ptr);
+            DEBUG_PRINT("[DEBUG] mm_free() - Removed block %p from explicit free list\n", ptr);
+
+            // Fix pointers
+            if (pg_hdr->prev) pg_hdr->prev->next = pg_hdr->next;
+            if (pg_hdr->next) pg_hdr->next->prev = pg_hdr->prev;
+            
+            // Unmap the page
+            mem_unmap(page_start, page_size);
+            
+            
+            DEBUG_PRINT("[DEBUG] --- mm_free End (Page Unmapped) ---\n");
+            return;
+        } else {
+            DEBUG_PRINT("[DEBUG] mm_free() - Block is full page, but it is the FIRST page or NULL. Not unmapping.\n");
+        }
+    }
+    else {
+        DEBUG_PRINT("[DEBUG] mm_free() - Block is not a full page block. Not unmapping.\n");
+
+    }
+
+    DEBUG_PRINT("[DEBUG] --- mm_free End (Standard Free) ---\n");
 }
 
 /* Helper Functions */
@@ -240,18 +327,22 @@ void *extend(size_t req_size) {
   }
   DEBUG_PRINT("[DEBUG] extend() - mem_map succeeded, new_page=%p\n", new_page);
 
+  page_header *pg_hdr = (page_header *)new_page;
+  pg_hdr->page_size = new_size;
+  pg_hdr->next = NULL;
+  pg_hdr->prev = last_page;
+
 
   if (first_page == NULL) { // First page being added
       first_page = new_page;
+      last_page = new_page;
   }
 
-
-  // Move past the padding to start setting up blocks
+  // Start at beg of page
+  
   char *start = (char *)new_page;
 
-  PUT(start, 0);
-
-  char* prologue = start + BLOCK_OVERHEAD;
+  char* prologue = start + sizeof(page_header) + sizeof(block_header); // Move past page header and prologue header
 
   // Set up prologue
   PUT(HDRP(prologue), PACK(BLOCK_OVERHEAD, 1));
@@ -411,3 +502,35 @@ void remove_from_free_list(void *bp) {
         SET_PREV_FREE(next, prev);
     }
 }
+
+
+int is_full_page_block(void *bp) {
+    void *next = NEXT_BLKP(bp);
+    void *prev = PREV_BLKP(bp);
+    
+    // Check if previous is prologue and next is epilogue
+    int prev_is_prologue = (GET_SIZE(HDRP(prev)) == BLOCK_OVERHEAD);
+    int next_is_epilogue = (GET_SIZE(HDRP(next)) == 0 && GET_ALLOC(HDRP(next)));
+    
+    return prev_is_prologue && next_is_epilogue;
+}
+
+
+void *get_page_start(void *bp) {
+    // Navigate back to find the page header
+    // bp -> go back to prologue -> go back to page header
+    void *prev = PREV_BLKP(bp);
+    
+    // If prev is prologue, page header is before it
+    if (GET_SIZE(HDRP(prev)) == BLOCK_OVERHEAD) {
+        // prev is prologue payload, go back to its header, then to page header
+        char *prologue_hdr = (char *)HDRP(prev);
+        char *page_start = prologue_hdr - sizeof(page_header);
+        return page_start;
+    }
+    
+    // If we're not next to prologue, keep walking back
+    // This shouldn't happen if is_full_page_block returns true
+    return NULL;
+}
+
