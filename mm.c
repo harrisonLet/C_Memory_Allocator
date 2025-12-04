@@ -44,7 +44,7 @@
 
   #define NEXT_BLKP(bp) ((char *) (bp) + GET_SIZE(HDRP(bp)))
 
-  #define PREV_BLKP(bp) ((char *) (bp) - GET_SIZE((char *) (bp) - sizeof(block_footer)))
+  #define PREV_BLKP(bp) ((char *) (bp) - GET_SIZE((char *) (bp) - sizeof(block_footer) - sizeof(block_header)))
 
 /* For packed headers/footers */
   #define GET(p) (*(size_t *) (p))
@@ -210,11 +210,13 @@ void mm_free(void *ptr)
   PUT(HDRP(ptr), PACK(block_size, 0));  // Mark header as free
   PUT(FTRP(ptr), PACK(block_size, 0));  // Mark footer as free
 
+  DEBUG_PRINT("[DEBUG] mm_free() - added to free list\n");
 
 
-  // ptr = coalesce(ptr);
-  // add_to_free_list(ptr);
-  // DEBUG_PRINT("[DEBUG] mm_free() - added to free list\n");
+
+  ptr = coalesce(ptr);
+  add_to_free_list(ptr);
+  DEBUG_PRINT("[DEBUG] mm_free() - added to free list\n");
 }
 
 /* Helper Functions */
@@ -261,7 +263,7 @@ void *extend(size_t req_size) {
   char* free_block = prologue + BLOCK_OVERHEAD;
   
   // Calculate size of the main free block
-  size_t block_size = ALIGN(new_size - PAGE_OVERHEAD);
+  size_t block_size = new_size - PAGE_OVERHEAD - PAGE_OVERHEAD - ALIGNMENT; // Leave room for epilogue and alignment padding
 
   PUT(HDRP(free_block), PACK(block_size, 0));
   PUT(FTRP(free_block), PACK(block_size, 0));
@@ -312,13 +314,24 @@ void set_allocated(void *bp, size_t size) {
 
 
 void *coalesce(void *bp) {
+
+    DEBUG_PRINT("[DEBUG] coalesce() - START bp=%p, size=%zu\n", bp, GET_SIZE(HDRP(bp)));
+
   size_t prev_alloc = GET_ALLOC(HDRP(PREV_BLKP(bp)));
   size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
   size_t size = GET_SIZE(HDRP(bp));
+
+    DEBUG_PRINT("[DEBUG] coalesce() - prev_alloc=%zu, next_alloc=%zu\n", prev_alloc, next_alloc);
+
   
   // Don't coalesce if next block is epilogue (size 0)
   if (GET_SIZE(HDRP(NEXT_BLKP(bp))) == 0) {
     next_alloc = 1;  // Treat epilogue as allocated (can't coalesce)
+  }
+
+  // Dont coalesce with prologue
+  if (GET_SIZE(HDRP(PREV_BLKP(bp))) == BLOCK_OVERHEAD) {
+    prev_alloc = 1;  // Treat prologue as allocated (can't coalesce)
   }
 
   // Case 1: Nothing to do
@@ -326,10 +339,11 @@ void *coalesce(void *bp) {
     return bp;
   }
 
-  // Case 2: Coalesce with next block (only if not epilogue)
-  else if (prev_alloc && !next_alloc && GET_SIZE(HDRP(NEXT_BLKP(bp))) > 0) {
+  // Case 2: Coalesce with next block
+  else if (prev_alloc && !next_alloc) {
     void *next_bp = NEXT_BLKP(bp);
     size += GET_SIZE(HDRP(next_bp));
+    remove_from_free_list(next_bp);
     PUT(HDRP(bp), PACK(size, 0));
     PUT(FTRP(bp), PACK(size, 0));
   }
@@ -338,18 +352,22 @@ void *coalesce(void *bp) {
   else if (!prev_alloc && next_alloc) {
     void *prev_bp = PREV_BLKP(bp);
     size += GET_SIZE(HDRP(prev_bp));
+    remove_from_free_list(prev_bp);
     PUT(HDRP(prev_bp), PACK(size, 0));
-    PUT(FTRP(bp), PACK(size, 0));
+    PUT(FTRP(prev_bp), PACK(size, 0));
     bp = prev_bp;
   }
 
   // Case 4: Coalesce with both (only if next is not epilogue)
-  else if (!prev_alloc && !next_alloc && GET_SIZE(HDRP(NEXT_BLKP(bp))) > 0) {
+  else if (!prev_alloc && !next_alloc) {
     void *prev_bp = PREV_BLKP(bp);
     void *next_bp = NEXT_BLKP(bp);
     size += GET_SIZE(HDRP(prev_bp)) + GET_SIZE(HDRP(next_bp));
+    remove_from_free_list(next_bp);
+    remove_from_free_list(prev_bp);
     PUT(HDRP(prev_bp), PACK(size, 0));
-    PUT(FTRP(next_bp), PACK(size, 0));
+    PUT(FTRP(prev_bp), PACK(size, 0));
+
     bp = prev_bp;
   }
 
