@@ -1,12 +1,9 @@
 /*
- * mm-naive.c - The least memory-efficient malloc package.
+ * mm.c - Harrison LeTourneau's implementation of a sophisticated memory allocator that used 
+ * mmap to request pages, maintains an explicit free list, and frees unused pages.
  * 
- * In this naive approach, a block is allocated by allocating a
- * new page as needed.  A block is pure payload. There are no headers or
- * footers.  Blocks are never coalesced or reused.
  *
- * Building allocator, starting with naive approach.
- * Iteration 2: mmap based allocator with explicit free list.
+ * Iteration 3: mmap based allocator with explicit free list.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,14 +15,6 @@
 #include "mm.h"
 #include "memlib.h"   
 
-/* Debug flag: set to 0 to disable debug output, 1 to enable */
-#define DEBUG 0
-
-#if DEBUG
-  #define DEBUG_PRINT(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
-#else
-  #define DEBUG_PRINT(fmt, ...) (void)0
-#endif
 
 /* always use 16-byte alignment for blocks */
 #define ALIGNMENT 16
@@ -114,9 +103,9 @@ typedef size_t block_footer;
 
 /* Page header */
 typedef struct page_header {
-    size_t page_size;              // Size of the page
-    struct page_header *next;      // Pointer to next page  
-    struct page_header *prev;      // Pointer to previous page
+    size_t page_size;
+    struct page_header *next;  
+    struct page_header *prev;
 } page_header;
 
 
@@ -136,20 +125,9 @@ void *get_page_start(void *bp);
  */
 int mm_init(void)
 {
-  // Butterfly knife guy mminit
-  // Freelist head null
-  // something else null
-  // extend by1 
-  // return return -1 if failed 0 if success
-
-  DEBUG_PRINT("[DEBUG] mm_init() called\n");
-  
   first_page = NULL;
-
   free_list_head = NULL;
-  
   extend(1);
- 
   return 0;
 }
 
@@ -159,10 +137,8 @@ int mm_init(void)
  */
 void *mm_malloc(size_t size)
 {
-  DEBUG_PRINT("[DEBUG] mm_malloc() - requested size=%zu\n", size);
 
   if (size == 0) {
-      DEBUG_PRINT("[DEBUG] mm_malloc() - size is 0, returning NULL\n");
       return NULL;
   }
 
@@ -171,8 +147,6 @@ void *mm_malloc(size_t size)
   if (new_size < MIN_BLOCK_SIZE) {
       new_size = MIN_BLOCK_SIZE;
   }
-  
-  DEBUG_PRINT("[DEBUG] mm_malloc() - aligned size=%d, MIN_BLOCK_SIZE=%zu\n", new_size, MIN_BLOCK_SIZE);
     
   // Traverse through the free list
 
@@ -180,109 +154,62 @@ void *mm_malloc(size_t size)
 
   while (bp != NULL) {
     size_t block_size = GET_SIZE(HDRP(bp));
-    DEBUG_PRINT("[DEBUG] mm_malloc() - checking free block bp=%p, size=%zu\n", bp, block_size);
     if (block_size >= new_size) {
         // Found a suitable block
-        DEBUG_PRINT("[DEBUG] mm_malloc() - found suitable block, allocating\n");
         remove_from_free_list(bp);
         set_allocated(bp, new_size);
-        DEBUG_PRINT("[DEBUG] mm_malloc() - returning allocated block bp=%p\n", bp);
         return bp;
     }
     bp = GET_NEXT_FREE(bp);
   }
   
-  DEBUG_PRINT("[DEBUG] mm_malloc() - no suitable free block found, extending\n");
   // No suitable block found in any page, need to extend
   bp = extend(new_size);
   if (bp == NULL) {
-      DEBUG_PRINT("[DEBUG] mm_malloc() - extend failed\n");
       return NULL;  // extend failed
   }
 
-  DEBUG_PRINT("[DEBUG] mm_malloc() - extend successful, bp=%p\n", bp);
   remove_from_free_list(bp);
   set_allocated(bp, new_size);
-  DEBUG_PRINT("[DEBUG] mm_malloc() - returning allocated block bp=%p\n", bp);
   return bp;
 }
 
 
 /*
- * mm_free - Freeing a block does nothing.
+ * mm_free
  */
 void mm_free(void *ptr)
 {
-    // 1. Validate Input
     if (ptr == NULL) {
-        DEBUG_PRINT("[DEBUG] mm_free() - ptr is NULL, ignoring\n");
         return;
     }
 
-    // Capture initial state
+    //  initial state
     void *hdr_ptr = HDRP(ptr);
     size_t block_size = GET_SIZE(hdr_ptr);
-    int alloc_bit = GET_ALLOC(hdr_ptr);
 
-    DEBUG_PRINT("\n[DEBUG] --- mm_free(ptr=%p) Start ---\n", ptr);
-    DEBUG_PRINT("[DEBUG] mm_free() - Current Header: %p | Size: %zu | Alloc: %d\n", 
-                hdr_ptr, block_size, alloc_bit);
-
-    // 2. Safety Check: Double Free Detection
-    if (alloc_bit == 0) {
-        DEBUG_PRINT("[ERROR] mm_free() - Double free detected at %p!\n", ptr);
-        // exit(1); // Optional: Crash immediately on double free
-    }
-
-    // 3. Mark block as free
+    // Mark block as free
     PUT(HDRP(ptr), PACK(block_size, 0));  // Mark header as free
     PUT(FTRP(ptr), PACK(block_size, 0));  // Mark footer as free
     
-    // Verify footer was placed correctly
-    DEBUG_PRINT("[DEBUG] mm_free() - Freed. New Header: 0x%x | New Footer at %p: 0x%x\n", 
-                GET(HDRP(ptr)), FTRP(ptr), GET(FTRP(ptr)));
+    // Coalesce
 
-    // 4. Coalescing
-    DEBUG_PRINT("[DEBUG] mm_free() - Attempting coalesce...\n");
-    
-    void *old_ptr = ptr;
     ptr = coalesce(ptr);
-    size_t new_size = GET_SIZE(HDRP(ptr));
-
-
-    if (ptr != old_ptr) {
-        DEBUG_PRINT("[DEBUG] mm_free() - Coalesced LEFT/BOTH. Ptr moved: %p -> %p\n", old_ptr, ptr);
-    } else if (new_size > block_size) {
-        DEBUG_PRINT("[DEBUG] mm_free() - Coalesced RIGHT. Ptr same, size increased: %zu -> %zu\n", block_size, new_size);
-    } else {
-        DEBUG_PRINT("[DEBUG] mm_free() - No coalescing occurred.\n");
-    }
-
-    DEBUG_PRINT("[DEBUG] Adding %p to free list\n", ptr);
-
     add_to_free_list(ptr);
 
-    // 5. Page Management Logic
+    //Page free Logic
+
     int is_full = is_full_page_block(ptr);
-    DEBUG_PRINT("[DEBUG] mm_free() - Page Check. is_full_page_block: %d\n", is_full);
 
     if (is_full) {
         void *page_start = get_page_start(ptr);
-        
-        DEBUG_PRINT("[DEBUG] mm_free() - Page Start: %p | Global First Page: %p\n", 
-                    page_start, first_page);
 
-        if (page_start != NULL && page_start != first_page) {
+        if (page_start != NULL && page_start != first_page) { // Don't unmap first page
             page_header *pg_hdr = (page_header *)page_start;
             size_t page_size = pg_hdr->page_size;
             
-            DEBUG_PRINT("[DEBUG] mm_free() - UNMAPPING page. Size: %zu\n", page_size);
-            DEBUG_PRINT("[DEBUG] mm_free() - Unlinking: Prev Page: %p | Next Page: %p\n", 
-                        pg_hdr->prev, pg_hdr->next);
-            
             // Remove from free list before unmapping
             remove_from_free_list(ptr);
-            DEBUG_PRINT("[DEBUG] mm_free() - Removed block %p from explicit free list\n", ptr);
 
             // Fix pointers
             if (pg_hdr->prev) pg_hdr->prev->next = pg_hdr->next;
@@ -290,42 +217,27 @@ void mm_free(void *ptr)
             
             // Unmap the page
             mem_unmap(page_start, page_size);
-            
-            
-            DEBUG_PRINT("[DEBUG] --- mm_free End (Page Unmapped) ---\n");
             return;
-        } else {
-            DEBUG_PRINT("[DEBUG] mm_free() - Block is full page, but it is the FIRST page or NULL. Not unmapping.\n");
         }
     }
-    else {
-        DEBUG_PRINT("[DEBUG] mm_free() - Block is not a full page block. Not unmapping.\n");
-
-    }
-
-    DEBUG_PRINT("[DEBUG] --- mm_free End (Standard Free) ---\n");
 }
 
 /* Helper Functions */
 
 void *extend(size_t req_size) {
-  DEBUG_PRINT("[DEBUG] extend() - requested size=%zu\n", req_size);
 
   //New page size required is the
   //passed in size + room for the page 
-  //overhead which is terminator + page header + prologue
+  //overhead which is epilogue + page header + prologue times some factor 30
 
   // Size of new page, aligned to 4096 bytes
   size_t new_size = PAGE_ALIGN((req_size + PAGE_OVERHEAD) * 30);
-  DEBUG_PRINT("[DEBUG] extend() - new_size after alignment=%zu (PAGE_OVERHEAD=%zu)\n", new_size, PAGE_OVERHEAD);
 
   // Request memory from mmap
   void *new_page = mem_map(new_size);
   if (new_page == NULL) {
-    DEBUG_PRINT("[DEBUG] extend() - mem_map failed\n");
     return NULL;  // mmap failed
   }
-  DEBUG_PRINT("[DEBUG] extend() - mem_map succeeded, new_page=%p\n", new_page);
 
   page_header *pg_hdr = (page_header *)new_page;
   pg_hdr->page_size = new_size;
@@ -360,15 +272,10 @@ void *extend(size_t req_size) {
   PUT(FTRP(free_block), PACK(block_size, 0));
 
   
-  DEBUG_PRINT("[DEBUG] extend() - main free block bp=%p, size=%zu\n", free_block, block_size);
-
-  
   // Set up epilogue block (allocated, zero size) - marks end of page
   PUT(HDRP(NEXT_BLKP(free_block)), PACK(0, 1));  // Epilogue header
-  DEBUG_PRINT("[DEBUG] extend() - epilogue set at offset %zu\n", (size_t)NEXT_BLKP(free_block) - (size_t)new_page);
 
   add_to_free_list(free_block);  // Add the new free block to the free list
-  DEBUG_PRINT("[DEBUG] extend() - returning bp=%p\n", free_block);
   
   return free_block;  // Return pointer to payload of the free block
 }
@@ -379,26 +286,20 @@ void set_allocated(void *bp, size_t size) {
   size_t block_size = GET_SIZE(HDRP(bp));
   size_t remaining_size = block_size - size;
   
-  DEBUG_PRINT("[DEBUG] set_allocated() - bp=%p, requested size=%zu, actual block_size=%zu, remaining=%zu\n", 
-          bp, size, block_size, remaining_size);
-  
-  if (remaining_size >= MIN_BLOCK_SIZE) {
-    DEBUG_PRINT("[DEBUG] set_allocated() - splitting block, allocated=%zu, free=%zu\n", size, remaining_size);
+  if (remaining_size >= MIN_BLOCK_SIZE) { // Split block
     PUT(HDRP(bp), PACK(size, 1));
     PUT(FTRP(bp), PACK(size, 1));
 
     void *remain = NEXT_BLKP(bp);
     
-    // VALIDATION: Check that remain is valid
-    DEBUG_PRINT("[DEBUG] set_allocated() - remain block at=%p\n", remain);
     
     PUT(HDRP(remain), PACK(remaining_size, 0));
     PUT(FTRP(remain), PACK(remaining_size, 0));
 
     add_to_free_list(remain);
   } 
-  else {
-    DEBUG_PRINT("[DEBUG] set_allocated() - no split, using entire block of size=%zu\n", block_size);
+
+  else {  // Not big enough to split
     PUT(HDRP(bp), PACK(block_size, 1));
     PUT(FTRP(bp), PACK(block_size, 1));
   }
@@ -407,15 +308,11 @@ void set_allocated(void *bp, size_t size) {
 
 void *coalesce(void *bp) {
 
-    DEBUG_PRINT("[DEBUG] coalesce() - START bp=%p, size=%zu\n", bp, GET_SIZE(HDRP(bp)));
-
   size_t prev_alloc = GET_ALLOC(HDRP(PREV_BLKP(bp)));
   size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
   size_t size = GET_SIZE(HDRP(bp));
 
-    DEBUG_PRINT("[DEBUG] coalesce() - prev_alloc=%zu, next_alloc=%zu\n", prev_alloc, next_alloc);
 
-  
   // Don't coalesce if next block is epilogue (size 0)
   if (GET_SIZE(HDRP(NEXT_BLKP(bp))) == 0) {
     next_alloc = 1;  // Treat epilogue as allocated (can't coalesce)
@@ -469,9 +366,6 @@ void *coalesce(void *bp) {
 
 
 void add_to_free_list(void *bp) {
-    DEBUG_PRINT("[DEBUG] add_to_free_list() - adding bp=%p, size=%zu, old head=%p\n", 
-            bp, GET_SIZE(HDRP(bp)), free_list_head);
-    
     SET_NEXT_FREE(bp, free_list_head);
     SET_PREV_FREE(bp, NULL);
     
@@ -480,19 +374,15 @@ void add_to_free_list(void *bp) {
     }
     
     free_list_head = bp;
-    DEBUG_PRINT("[DEBUG] add_to_free_list() - new head=%p\n", free_list_head);
 }
 
 void remove_from_free_list(void *bp) {
     void *next = GET_NEXT_FREE(bp);
     void *prev = GET_PREV_FREE(bp);
     
-    DEBUG_PRINT("[DEBUG] remove_from_free_list() - removing bp=%p, prev=%p, next=%p\n", bp, prev, next);
-    
     // Update previous block's next pointer (or head if bp is first)
     if (prev == NULL) {
         free_list_head = next;  // bp was the head
-        DEBUG_PRINT("[DEBUG] remove_from_free_list() - was head, new head=%p\n", free_list_head);
     } else {
         SET_NEXT_FREE(prev, next);
     }
@@ -530,7 +420,7 @@ void *get_page_start(void *bp) {
     }
     
     // If we're not next to prologue, keep walking back
-    // This shouldn't happen if is_full_page_block returns true
+    // Only gets called if full free block, so no need
     return NULL;
 }
 
